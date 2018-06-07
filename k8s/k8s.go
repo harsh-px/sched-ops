@@ -3,6 +3,7 @@ package k8s
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	dockerterm "github.com/docker/docker/pkg/term"
 	snap_v1 "github.com/kubernetes-incubator/external-storage/snapshot/pkg/apis/crd/v1"
 	snap_client "github.com/kubernetes-incubator/external-storage/snapshot/pkg/client"
 	"github.com/portworx/sched-ops/task"
@@ -31,6 +33,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/kubernetes/pkg/kubectl/cmd"
+	"k8s.io/kubernetes/pkg/kubectl/util/term"
 )
 
 const (
@@ -281,7 +285,7 @@ type PodOps interface {
 	// WaitForPodDeletion waits for given timeout for given pod to be deleted
 	WaitForPodDeletion(uid types.UID, namespace string, timeout time.Duration) error
 	// RunCommandInPod runs given command in the given pod
-	RunCommandInPod(cmds []string, podName, containerName, namespace string) (string, error)
+	RunCommandInPod(cmds []string, podName, containerName, namespace string, stdout, stderr io.Writer, stdin io.Reader) (string, error)
 }
 
 // StorageClassOps is an interface to perform k8s storage class operations
@@ -816,16 +820,54 @@ func (k *k8sOps) WaitForPodDeletion(uid types.UID, namespace string, timeout tim
 	return nil
 }
 
-func (k *k8sOps) RunCommandInPod(cmds []string, podName, containerName, namespace string) (string, error) {
+func setupTTY(o *cmd.ExecOptions) term.TTY {
+	t := term.TTY{
+		Parent: o.InterruptParent,
+		Out:    o.Out,
+	}
+
+	if !o.Stdin {
+		// need to nil out o.In to make sure we don't create a stream for stdin
+		o.In = nil
+		o.TTY = false
+		return t
+	}
+
+	t.In = o.In
+	if !o.TTY {
+		return t
+	}
+
+	if !t.IsTerminalIn() {
+		o.TTY = false
+
+		if o.Err != nil {
+			fmt.Fprintln(o.Err, "Unable to use a TTY - input is not a terminal or the right kind of file")
+		}
+
+		return t
+	}
+
+	// if we get to here, the user wants to attach stdin, wants a TTY, and o.In is a terminal, so we
+	// can safely set t.Raw to true
+	t.Raw = true
+
+	stdin, stdout, _ := dockerterm.StdStreams()
+	o.In = stdin
+	t.In = stdin
+	if o.Out != nil {
+		o.Out = stdout
+		t.Out = stdout
+	}
+
+	return t
+}
+
+func (k *k8sOps) RunCommandInPod(cmds []string, podName, containerName, namespace string, stdout, stderr io.Writer, in io.Reader) (string, error) {
 	err := k.initK8sClient()
 	if err != nil {
 		return "", err
 	}
-
-	var (
-		execOut bytes.Buffer
-		execErr bytes.Buffer
-	)
 
 	pod, err := k.client.Core().Pods(namespace).Get(podName, meta_v1.GetOptions{})
 	if err != nil {
@@ -844,35 +886,53 @@ func (k *k8sOps) RunCommandInPod(cmds []string, podName, containerName, namespac
 		Resource("pods").
 		Name(podName).
 		Namespace(namespace).
-		SubResource("exec")
+		SubResource("exec").
+		Param("container", containerName)
 
 	req.VersionedParams(&v1.PodExecOptions{
 		Container: containerName,
 		Command:   cmds,
+		Stdin:     true,
 		Stdout:    true,
 		Stderr:    true,
+		TTY:       true,
 	}, scheme.ParameterCodec)
+
+	execOpts := &cmd.ExecOptions{
+		StreamOptions: cmd.StreamOptions{
+			In:  in,
+			Out: stdout,
+			Err: stderr,
+		},
+		Executor: &cmd.DefaultRemoteExecutor{},
+	}
+
+	t := setupTTY(execOpts)
 
 	exec, err := remotecommand.NewSPDYExecutor(k.config, "POST", req.URL())
 	if err != nil {
 		return "", fmt.Errorf("failed to init executor: %v", err)
 	}
 
-	err = exec.Stream(remotecommand.StreamOptions{
-		Stdout: &execOut,
-		Stderr: &execErr,
-		Tty:    false,
-	})
+	fn := func() error {
+		err = exec.Stream(remotecommand.StreamOptions{
+			Stdin:  in,
+			Stdout: stdout,
+			Stderr: stderr,
+			Tty:    true,
+		})
+		if err != nil {
+			return fmt.Errorf("could not execute: %v", err)
+		}
 
-	if err != nil {
-		return execErr.String(), fmt.Errorf("could not execute: %v", err)
+		return nil
 	}
 
-	if execErr.Len() > 0 {
-		return execErr.String(), nil
+	if err = t.Safe(fn); err != nil {
+		return "", err
 	}
 
-	return execOut.String(), nil
+	return "", nil
 }
 
 // Service APIs - BEGIN
