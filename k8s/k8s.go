@@ -273,6 +273,8 @@ type PodOps interface {
 	GetPodsUsingVolumePluginByNodeName(nodeName, plugin string) ([]v1.Pod, error)
 	// GetPodByName returns pod for the given pod name and namespace
 	GetPodByName(string, string) (*v1.Pod, error)
+	// GetPodLogs returns logs of given pod's container
+	GetPodLogs(name, namespace, container string) (string, error)
 	// GetPodByUID returns pod with the given UID, or error if nothing found
 	GetPodByUID(types.UID, string) (*v1.Pod, error)
 	// DeletePods deletes the given pods
@@ -1946,6 +1948,39 @@ func (k *k8sOps) GetPodByName(podName string, namespace string) (*v1.Pod, error)
 	}
 
 	return pod, nil
+}
+
+func (k *k8sOps) GetPodLogs(name, namespace, container string) (string, error) {
+	if err := k.initK8sClient(); err != nil {
+		return "", err
+	}
+
+	req := k.client.RESTClient().Get().
+		Namespace(namespace).
+		Name(name).
+		Resource("pods").
+		SubResource("log").
+		Param("container", container)
+		//Param("follow", strconv.FormatBool(logOptions.Follow)).
+		//Param("previous", strconv.FormatBool(logOptions.Previous)).
+		//Param("timestamps", strconv.FormatBool(logOptions.Timestamps))
+
+	/*if logOptions.TailLines != nil {
+		req.Param("tailLines", strconv.FormatInt(*logOptions.TailLines, 10))
+	}*/
+
+	readCloser, err := req.Stream()
+	if err != nil {
+		return "", err
+	}
+
+	defer readCloser.Close()
+	buf := new(bytes.Buffer)
+	_, err = buf.ReadFrom(readCloser)
+	if err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 func (k *k8sOps) GetPodByUID(uid types.UID, namespace string) (*v1.Pod, error) {
