@@ -74,6 +74,9 @@ type Ops interface {
 	CRDOps
 	ClusterPairOps
 	MigrationOps
+
+	// private methods for unit tests
+	privateMethods
 }
 
 // EventOps is an interface to put and get k8s events
@@ -435,6 +438,10 @@ type MigrationOps interface {
 	UpdateMigration(*v1alpha1.Migration) (*v1alpha1.Migration, error)
 	// DeleteMigration deletes the Migration
 	DeleteMigration(string, string) error
+}
+
+type privateMethods interface {
+	initK8sClient() error
 }
 
 // CustomResource is for creating a Kubernetes TPR/CRD
