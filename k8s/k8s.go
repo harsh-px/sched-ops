@@ -470,10 +470,6 @@ type privateMethods interface {
 	initK8sClient() error
 }
 
-type privateMethods interface {
-	initK8sClient() error
-}
-
 // CustomResource is for creating a Kubernetes TPR/CRD
 type CustomResource struct {
 	// Name of the custom resource
